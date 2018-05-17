@@ -1,0 +1,319 @@
+#include <stdio.h>
+
+#define WINDOW_SIZE	4096
+#define LOOKAHEAD_SIZE	16
+#define HISTORY_SIZE	(WINDOW_SIZE-LOOKAHEAD_SIZE)
+
+#define LENSHIFT 4		// this must be log2(LOOKAHEAD_SIZE)
+
+extern char *malloc(int);
+
+typedef struct node_struct node_t;
+struct node_struct
+{
+  unsigned char *pointer;
+  node_t *prev;
+  node_t *next;
+};
+
+typedef struct list_struct
+{
+  node_t *start;
+  node_t *end;
+} list_t;
+
+static list_t encodinghashtable[256]; // used for faster encoding
+
+//
+//  Removes a node from the hash table at the specified index
+//
+
+void removenode(int index)
+{
+  node_t *p;
+  list_t *list;
+
+  list = &encodinghashtable[index];
+
+  p = list->end;
+  if (p)
+  {
+    if (p->prev)
+      p->prev->next = 0;
+    else
+      list->start = p->next;
+    list->end = p->prev;
+    free(p);
+  }
+
+}
+
+//
+//  Adds a node to the hash table at the beginning of a particular index
+//
+
+void addnode(int index, unsigned char *pointer)
+{
+  node_t *p;
+  list_t *list;
+
+  p = (node_t *) malloc(sizeof(node_t));
+
+  list = &encodinghashtable[index];
+  p->next = list->start;
+  p->prev = 0;
+  p->pointer = pointer;
+  if (list->start)
+    list->start->prev = p;
+  else
+    list->end = p;
+  list->start = p;
+
+}
+
+void derror(char *msg)
+{
+  fprintf(stderr, "\nerror: %s\n\n", msg);
+  exit(-1);
+}
+
+//
+//  whether two strings are the same.
+//  returns the largest length of commonality.
+//
+
+int sameness(unsigned char *a, unsigned char *b, int len)
+{
+  if (!(*((int*)a) ^ *((int*)b))) // another way of saying "=="
+  {
+    int i=4;
+    len-=4;
+    while (len-- && a[i] == b[i]) i++;
+    return i;
+  }
+// use this only for little endian machines
+//  else if (!((*((int*)a) ^ *((int*)b)) & 0xffffff))
+//    return 3;
+  else
+    return 0;
+}
+
+unsigned char *encode(unsigned char *input, int inputlen, int *size)
+{
+
+  int putidbyte = 0;
+  unsigned char *encodedpos;
+  int encodedlen;
+  int i, rc, pacifier=0;
+  int len;
+  int numbytes, numcodes;
+  int codelencount;
+  unsigned char *window;
+  unsigned char *newwindow;
+  int windowsize;
+  unsigned char *lookahead;
+  unsigned char *idbyte;
+  unsigned char *output, *ostart;
+  node_t *hashp;
+
+  // initialize the hash table to the occurences of bytes
+  for (i=0 ; i<256 ; i++)
+  {
+    encodinghashtable[i].start = 0;
+    encodinghashtable[i].end = 0;
+  }
+
+  // create the output
+  ostart = output = (unsigned char *) malloc((inputlen * 9)/8+1);
+
+  // initialize the window & lookahead
+  lookahead = window = input;
+
+  numbytes = numcodes = codelencount = 0;
+
+  while (inputlen > 0)
+  {
+
+    // set the window position and size
+    newwindow = lookahead - HISTORY_SIZE;
+    if (newwindow < input) newwindow = input;
+    windowsize = LOOKAHEAD_SIZE + (lookahead - newwindow);
+
+    // remove nodes on the hash table as the window moves
+    for (i=0 ; i<newwindow - window; i++)
+      removenode(window[i]);
+
+    window = newwindow;
+
+    // decide whether to allocate a new id byte
+    if (!putidbyte)
+    {
+      idbyte = output++;
+      *idbyte = 0;
+    }
+    putidbyte = (putidbyte + 1) & 7;
+
+    // go through the hash table of linked lists to find the strings
+    // starting with the first character in the lookahead
+
+    encodedlen = 0;
+    len = inputlen < LOOKAHEAD_SIZE ? inputlen : LOOKAHEAD_SIZE;
+
+    hashp = encodinghashtable[lookahead[0]].start;
+    while (hashp)
+    {
+      rc = sameness(hashp->pointer, lookahead, len);
+      if (rc > encodedlen)
+      {
+	encodedlen = rc;
+	encodedpos = hashp->pointer;
+      }
+      if (rc == len) break;
+	
+      hashp = hashp->next;
+    }
+
+    // encode the match and specify the length of the encoding
+    if (encodedlen>3)
+    {
+      *idbyte = (*idbyte >> 1) | 0x80;
+      *output++ = ((lookahead-encodedpos) >> LENSHIFT);
+      *output++ = ((lookahead-encodedpos) << LENSHIFT) | (encodedlen-1);
+      numcodes++;
+      codelencount+=encodedlen;
+    } else { // or just store the unmatched byte
+      encodedlen = 1;
+      *idbyte = (*idbyte >> 1);
+      *output++ = *lookahead;
+      numbytes++;
+    }
+
+    // update the hash table as the window slides
+    for (i=0 ; i<encodedlen ; i++)
+      addnode(lookahead[i], lookahead+i);
+
+    // reduce the input size
+    inputlen -= encodedlen;
+    // update the lookahead postition
+    lookahead += encodedlen;
+
+    // print pacifier dots
+    pacifier -= encodedlen;
+    if (pacifier<=0)
+    {
+      fprintf(stderr, ".");
+      pacifier += 10000;
+    }
+
+  }
+
+  if (inputlen != 0)
+    fprintf(stderr, "warning: inputlen != 0\n");
+
+  // put the end marker on the file
+  if (!putidbyte)
+  {
+    idbyte = output++;
+    *idbyte = 1;
+  }
+  else
+    *idbyte = ((*idbyte>>1)|0x80)>>(7-putidbyte);
+
+  *output++ = 0;
+  *output++ = 0;
+
+  *size = output - ostart;
+
+  // frees up the hashing table
+  for (i=0 ; i<256 ; i++)
+    while (encodinghashtable[i].start) removenode(i);
+
+/*
+  fprintf(stderr, "\nnum bytes = %d\n", numbytes);
+  fprintf(stderr, "num codes = %d\n", numcodes);
+  fprintf(stderr, "ave code length = %f\n", (double) codelencount/numcodes);
+*/
+
+  return ostart;
+
+}
+
+//
+//  Return the size of compressed data
+//
+
+int decodedsize(unsigned char *input)
+{
+
+  typedef unsigned short ushort;
+  typedef unsigned long ulong;
+  typedef unsigned char uchar;
+
+  ushort getidbyte = 0;
+  short len;
+  uchar idbyte;
+  int accum = 0;
+
+  while (1)
+  {
+
+    // get a new idbyte if necessary
+    if (!getidbyte) idbyte = *input++;
+    getidbyte = (getidbyte + 1) & 7;
+
+    if (idbyte&1)
+    {
+      // decompress
+      input++;
+      len = *input++ & 0xf;
+      if (!len) break;
+      accum += len+1;
+    }
+    else
+      accum++;
+    input++;
+
+    idbyte = idbyte >> 1;
+
+  }
+
+  return accum;
+
+}
+
+void decode(unsigned char *input, unsigned char *output)
+{
+
+  int getidbyte = 0;
+  int len;
+  int pos;
+  int i;
+  unsigned char *source;
+  int idbyte;
+
+  while (1)
+  {
+
+    // get a new idbyte if necessary
+    if (!getidbyte) idbyte = *input++;
+    getidbyte = (getidbyte + 1) & 7;
+
+    if (idbyte&1)
+    {
+      // decompress
+      pos = *input++ << LENSHIFT;
+      pos = pos | (*input >> LENSHIFT);
+      source = output - pos;
+      len = (*input++ & 0xf)+1;
+      if (len==1) break;
+      for (i=0 ; i<len ; i++)
+        *output++ = *source++;
+    } else {
+      *output++ = *input++;
+    }
+
+    idbyte = idbyte >> 1;
+
+  }
+
+}

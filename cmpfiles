@@ -1,0 +1,32 @@
+#!/bin/csh -fb
+
+set cmpfile=/flem/doom/utils/cmpfile
+set masterdir=/flem/doom/code
+
+set fromdir=$1
+set todir=$masterdir
+
+if ( $#argv != 1 ) then
+	echo 'Usage: cmpfiles <fromdir>'
+	exit -1
+endif
+
+if ( "$fromdir" == "$todir" ) then
+	echo 'Directories equal'
+	exit -1
+endif
+
+foreach toname ($todir/*)
+
+	set name=$toname:t
+	set fromname=$fromdir/$name
+	set suffix=$name:e
+
+	if ( "$suffix" == "exe" || "$suffix" == "obj" ) continue
+
+	if ( -f $fromname && -f $toname ) then
+		$cmpfile $fromname $toname
+	endif
+
+end
+
